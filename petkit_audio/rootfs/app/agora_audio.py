@@ -207,6 +207,27 @@ def _stdout_writer(frames: queue.Queue) -> None:
 
 
 
+def _apply_payload_type(parameter, where: str) -> None:
+    """Tell the decoder which payload type the feeder publishes under.
+
+    Frames arrive but never decode without this, because the decoder has no
+    mapping for the device's non-standard payload type. Both forms are attempted
+    and the return codes show which one the SDK accepted.
+    """
+    if parameter is None:
+        LOGGER.warning("No parameter object on %s", where)
+        return
+    via_json = parameter.set_parameters(
+        json.dumps({"che.audio.custom_payload_type": CUSTOM_AUDIO_PAYLOAD_TYPE})
+    )
+    via_int = parameter.set_int(
+        "che.audio.custom_payload_type", CUSTOM_AUDIO_PAYLOAD_TYPE
+    )
+    LOGGER.info(
+        "custom_payload_type on %s: set_parameters=%s set_int=%s", where, via_json, via_int
+    )
+
+
 def _load_session(path: str) -> dict:
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
