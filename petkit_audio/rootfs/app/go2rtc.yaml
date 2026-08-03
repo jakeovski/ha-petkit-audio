@@ -1,0 +1,16 @@
+api:
+  listen: ":1984"
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555/tcp"
+
+log:
+  level: info
+
+streams:
+  # Started on demand: go2rtc runs the pipeline when a client connects and stops
+  # it when the last one leaves, so the feeder is only joined while watched.
+  petkit_audio: exec:/app/audio_pipe.sh {output}

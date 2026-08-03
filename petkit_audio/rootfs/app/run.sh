@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Serve the feeder's audio as RTSP on :8554/petkit_audio.
 #
-# ffmpeg acts as the RTSP server (-rtsp_flags listen), so it blocks until a
-# client connects and exits when that client goes away - hence the restart loop.
+# go2rtc owns the RTSP server and starts the Agora pipeline on demand, so the
+# channel is only joined while something is listening. ffmpeg alone cannot do
+# this: as an RTSP listener it exits the moment no client is attached, which
+# leaves the Agora client writing into a broken pipe.
 set -uo pipefail
 
 OPTIONS=/data/options.json
@@ -19,16 +21,6 @@ export SESSION_FILE
 export LOG_LEVEL
 
 echo "[petkit_audio] session file: ${SESSION_FILE}"
-echo "[petkit_audio] serving rtsp://0.0.0.0:8554/petkit_audio"
+echo "[petkit_audio] serving rtsp://<addon>:8554/petkit_audio"
 
-while true; do
-    python3 -u /app/agora_audio.py \
-        | ffmpeg -hide_banner -loglevel warning \
-            -f s16le -ar 16000 -ac 1 -i pipe:0 \
-            -c:a libopus -b:a 32k -application lowdelay \
-            -f rtsp -rtsp_flags listen \
-            rtsp://0.0.0.0:8554/petkit_audio
-
-    echo "[petkit_audio] pipeline exited; restarting in 5s"
-    sleep 5
-done
+exec /usr/local/bin/go2rtc -config /app/go2rtc.yaml
