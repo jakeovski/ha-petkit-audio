@@ -152,6 +152,28 @@ class _AudioSink(IAudioFrameObserver):
         return 0
 
 
+def _apply_payload_type(parameter, where: str) -> None:
+    """Tell the decoder which payload type the feeder publishes under.
+
+    Frames arrive but never reach `on_first_remote_audio_decoded` without this,
+    because the decoder has no mapping for the device's non-standard payload
+    type. Both forms are attempted - the return codes tell us which one took.
+    """
+    if parameter is None:
+        LOGGER.warning("No parameter object on %s", where)
+        return
+    via_json = parameter.set_parameters(
+        json.dumps({"che.audio.custom_payload_type": CUSTOM_AUDIO_PAYLOAD_TYPE})
+    )
+    via_int = parameter.set_int(
+        "che.audio.custom_payload_type", CUSTOM_AUDIO_PAYLOAD_TYPE
+    )
+    LOGGER.info(
+        "custom_payload_type on %s: set_parameters=%s set_int=%s", where, via_json, via_int
+    )
+
+
+
 def _load_session(path: str) -> dict:
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
@@ -213,11 +235,7 @@ def main() -> int:
         LOGGER.error("AgoraService.initialize failed")
         return 1
 
-    parameter = service.get_agora_parameter()
-    if parameter is not None:
-        parameter.set_parameters(
-            json.dumps({"che.audio.custom_payload_type": CUSTOM_AUDIO_PAYLOAD_TYPE})
-        )
+    _apply_payload_type(service.get_agora_parameter(), "service")
 
     conn_config = RTCConnConfig(
         auto_subscribe_audio=1,
@@ -233,11 +251,7 @@ def main() -> int:
 
     # The vendor app sets this on its engine before joining. Setting it only on
     # the service may not reach the connection that actually decodes the stream.
-    conn_parameter = connection.get_agora_parameter()
-    if conn_parameter is not None:
-        conn_parameter.set_parameters(
-            json.dumps({"che.audio.custom_payload_type": CUSTOM_AUDIO_PAYLOAD_TYPE})
-        )
+    _apply_payload_type(connection.get_agora_parameter(), "connection")
 
     connection.register_observer(_ConnectionLog())
     connection.register_local_user_observer(_TrackLog())
@@ -258,6 +272,8 @@ def main() -> int:
     # trigger an implicit subscribe.
     subscribed = local_user.subscribe_all_audio()
     LOGGER.info("subscribe_all_audio -> %s", subscribed)
+    # Re-apply once joined: some parameters only bind to a live connection.
+    _apply_payload_type(connection.get_agora_parameter(), "connection (post-connect)")
 
     LOGGER.info("Connected; waiting for audio")
     last_report = time.time()
