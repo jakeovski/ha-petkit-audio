@@ -22,4 +22,8 @@ export LOG_LEVEL
 echo "[petkit_audio] session file: ${SESSION_FILE}"
 echo "[petkit_audio] serving rtsp://<addon>:8554/petkit_audio"
 
-exec /usr/local/bin/go2rtc -config /app/go2rtc.yaml
+# Mirror the log into /config as well as the Supervisor log: the Supervisor log
+# is not always reachable, and diagnosing an audio pipeline blind is hopeless.
+LOGFILE=/config/petkit_audio.log
+: > "$LOGFILE"
+exec /usr/local/bin/go2rtc -config /app/go2rtc.yaml 2>&1 | tee -a "$LOGFILE"
