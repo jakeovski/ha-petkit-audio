@@ -1,9 +1,11 @@
-ARG BUILD_FROM=python:3.11-slim-bookworm
-FROM ${BUILD_FROM}
+# Deliberately NOT using BUILD_FROM. Supervisor injects an Alpine/musl base, and
+# Agora ships its RTC SDK as a glibc binary (aarch64-linux-gnu) that cannot load
+# there - which is the entire reason this runs as an add-on instead of inside the
+# Home Assistant container.
+FROM python:3.11-slim-bookworm
 
-# Agora ships its RTC SDK as glibc aarch64 (aarch64-linux-gnu). Home Assistant's
-# own container is Alpine/musl and cannot load it, which is the whole reason this
-# runs as a separate add-on rather than inside the integration.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
