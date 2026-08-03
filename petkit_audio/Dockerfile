@@ -35,6 +35,6 @@ RUN set -eux; \
     chmod +x /usr/local/bin/go2rtc
 
 COPY rootfs/ /
-RUN chmod +x /app/run.sh /app/audio_pipe.sh
+RUN chmod +x /app/run.sh
 
 CMD ["/app/run.sh"]

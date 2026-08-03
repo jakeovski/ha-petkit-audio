@@ -1,5 +1,5 @@
 name: PetKit Camera Audio
-version: "0.2.1"
+version: "0.2.2"
 slug: petkit_audio
 description: >-
   Joins the PetKit feeder's Agora channel with Agora's native SDK - the same way

@@ -4,13 +4,13 @@ api:
 rtsp:
   listen: ":8554"
 
-webrtc:
-  listen: ":8555/tcp"
-
 log:
   level: info
 
-streams:
-  # Started on demand: go2rtc runs the pipeline when a client connects and stops
-  # it when the last one leaves, so the feeder is only joined while watched.
-  petkit_audio: exec:/app/audio_pipe.sh {output}
+# No stream is declared here on purpose. The publisher pushes into go2rtc over
+# RTSP and go2rtc creates "petkit_audio" itself, so the stream is already live
+# when Home Assistant asks for it. Starting the Agora join on demand instead
+# made every consumer wait ~15s for the channel handshake - and because the
+# camera now points at a stream combining this with the video, that delay was
+# blocking the video too.
+streams: {}
