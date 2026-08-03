@@ -1,0 +1,26 @@
+name: PetKit Camera Audio
+version: "0.1.0"
+slug: petkit_audio
+description: >-
+  Joins the PetKit feeder's Agora channel with Agora's native SDK - the same way
+  the vendor app does - and republishes the feeder's audio as RTSP so it can be
+  merged with the existing video stream.
+url: https://github.com/jakeovski/ha-petkit-audio
+arch:
+  - aarch64
+  - amd64
+init: false
+startup: application
+boot: auto
+map:
+  - config:rw
+ports:
+  8554/tcp: 8554
+ports_description:
+  8554/tcp: RTSP endpoint carrying the feeder audio
+options:
+  session_file: /config/petkit_agora_session.json
+  log_level: info
+schema:
+  session_file: str
+  log_level: list(debug|info|warning|error)
