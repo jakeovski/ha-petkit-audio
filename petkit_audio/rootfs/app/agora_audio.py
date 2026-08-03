@@ -122,6 +122,7 @@ class _AudioSink(IAudioFrameObserver):
 
     def __init__(self) -> None:
         self.frames = 0
+        self.calls = 0
         self.mixed_frames = 0
         self.first_frame_logged = False
 
@@ -129,6 +130,9 @@ class _AudioSink(IAudioFrameObserver):
         self, agora_local_user, channelId, uid, frame, vad_result_state, vad_result_bytearray
     ):
         # Callbacks must stay cheap - copying bytes out is all we do here.
+        self.calls += 1
+        if self.calls == 1:
+            LOGGER.info("before_mixing callback firing (uid=%s)", uid)
         data = getattr(frame, "buffer", None)
         if data:
             sys.stdout.buffer.write(data)
@@ -255,11 +259,13 @@ def main() -> int:
 
     connection.register_observer(_ConnectionLog())
     connection.register_local_user_observer(_TrackLog())
-    sink = _AudioSink()
-    connection.register_audio_frame_observer(sink, 0, None)
     local_user = connection.get_local_user()
-    local_user.set_playback_audio_frame_before_mixing_parameters(CHANNELS, SAMPLE_RATE)
-    local_user.set_playback_audio_frame_parameters(CHANNELS, SAMPLE_RATE, 0, SAMPLE_RATE // 100)
+    # Set the frame format before registering, so the observer is installed
+    # against parameters the SDK has already accepted.
+    fmt = local_user.set_playback_audio_frame_before_mixing_parameters(CHANNELS, SAMPLE_RATE)
+    sink = _AudioSink()
+    registered = connection.register_audio_frame_observer(sink, 0, None)
+    LOGGER.info("frame params -> %s, observer registered -> %s", fmt, registered)
 
     if connection.connect(token, channel_id, uid) != 0:
         LOGGER.error("connect failed for channel=%s uid=%s", channel_id, uid)
@@ -280,7 +286,7 @@ def main() -> int:
     while _running:
         time.sleep(1)
         if time.time() - last_report >= 30:
-            LOGGER.info("%d audio frames forwarded (%d mixed)", sink.frames, sink.mixed_frames)
+            LOGGER.info("%d frames forwarded (%d mixed, %d callbacks)", sink.frames, sink.mixed_frames, sink.calls)
             last_report = time.time()
 
     LOGGER.info("Shutting down after %d frames", sink.frames)
