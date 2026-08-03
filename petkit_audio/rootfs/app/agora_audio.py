@@ -85,6 +85,7 @@ class _AudioSink(IAudioFrameObserver):
 
     def __init__(self) -> None:
         self.frames = 0
+        self.mixed_frames = 0
         self.first_frame_logged = False
 
     def on_playback_audio_frame_before_mixing(
@@ -99,6 +100,18 @@ class _AudioSink(IAudioFrameObserver):
             if not self.first_frame_logged:
                 LOGGER.info("First audio frame from uid=%s (%d bytes)", uid, len(data))
                 self.first_frame_logged = True
+        return 0
+
+    def on_playback_audio_frame(self, agora_local_user, channelId, frame):
+        # Fallback path: with a single remote publisher some builds deliver
+        # the mixed playback frame rather than the per-user one.
+        data = getattr(frame, "buffer", None)
+        if data and not self.frames:
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+            self.mixed_frames += 1
+            if self.mixed_frames == 1:
+                LOGGER.info("First mixed audio frame (%d bytes)", len(data))
         return 0
 
 
@@ -181,11 +194,20 @@ def main() -> int:
         service.release()
         return 1
 
+    # The vendor app sets this on its engine before joining. Setting it only on
+    # the service may not reach the connection that actually decodes the stream.
+    conn_parameter = connection.get_agora_parameter()
+    if conn_parameter is not None:
+        conn_parameter.set_parameters(
+            json.dumps({"che.audio.custom_payload_type": CUSTOM_AUDIO_PAYLOAD_TYPE})
+        )
+
     connection.register_observer(_ConnectionLog())
     sink = _AudioSink()
     connection.register_audio_frame_observer(sink, 0, None)
     local_user = connection.get_local_user()
     local_user.set_playback_audio_frame_before_mixing_parameters(CHANNELS, SAMPLE_RATE)
+    local_user.set_playback_audio_frame_parameters(CHANNELS, SAMPLE_RATE, 0, SAMPLE_RATE // 100)
 
     if connection.connect(token, channel_id, uid) != 0:
         LOGGER.error("connect failed for channel=%s uid=%s", channel_id, uid)
@@ -204,7 +226,7 @@ def main() -> int:
     while _running:
         time.sleep(1)
         if time.time() - last_report >= 30:
-            LOGGER.info("%d audio frames forwarded", sink.frames)
+            LOGGER.info("%d audio frames forwarded (%d mixed)", sink.frames, sink.mixed_frames)
             last_report = time.time()
 
     LOGGER.info("Shutting down after %d frames", sink.frames)
