@@ -118,12 +118,18 @@ class _TrackLog(IRTCLocalUserObserver):
 
 
 class _AudioSink(IAudioFrameObserver):
-    """Write every remote audio frame straight to stdout."""
+    """Write the feeder's audio frames to stdout.
 
-    def __init__(self) -> None:
+    The callback fires once per remote user and this channel holds more than one
+    - the feeder plus Home Assistant's own signalling session. Writing both into
+    the same pipe interleaves two PCM streams, which is heard as robotic noise,
+    so everything except the publisher is discarded.
+    """
+
+    def __init__(self, publisher_uid: str) -> None:
+        self.publisher_uid = str(publisher_uid)
         self.frames = 0
         self.calls = 0
-        self.mixed_frames = 0
         self.first_frame_logged = False
 
     def on_playback_audio_frame_before_mixing(
@@ -131,29 +137,25 @@ class _AudioSink(IAudioFrameObserver):
     ):
         # Callbacks must stay cheap - copying bytes out is all we do here.
         self.calls += 1
-        if self.calls == 1:
-            LOGGER.info("before_mixing callback firing (uid=%s)", uid)
+        if str(uid) != self.publisher_uid:
+            return 0
         data = getattr(frame, "buffer", None)
         if data:
             sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
             self.frames += 1
             if not self.first_frame_logged:
-                LOGGER.info("First audio frame from uid=%s (%d bytes)", uid, len(data))
+                LOGGER.info(
+                    "First frame from uid=%s: %d bytes, %s Hz, %s ch, %s bytes/sample",
+                    uid,
+                    len(data),
+                    getattr(frame, "samples_per_sec", None),
+                    getattr(frame, "channels", None),
+                    getattr(frame, "bytes_per_sample", None),
+                )
                 self.first_frame_logged = True
         return 0
 
-    def on_playback_audio_frame(self, agora_local_user, channelId, frame):
-        # Fallback path: with a single remote publisher some builds deliver
-        # the mixed playback frame rather than the per-user one.
-        data = getattr(frame, "buffer", None)
-        if data and not self.frames:
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-            self.mixed_frames += 1
-            if self.mixed_frames == 1:
-                LOGGER.info("First mixed audio frame (%d bytes)", len(data))
-        return 0
 
 
 def _apply_payload_type(parameter, where: str) -> None:
@@ -232,7 +234,7 @@ def main() -> int:
     # Keep delivering callbacks even if Agora considers the publisher muted.
     # Without this a muted remote is silently indistinguishable from one that is
     # simply not sending, which is exactly the ambiguity we are trying to settle.
-    config.should_callbck_when_muted = 1
+    config.should_callbck_when_muted = 0
 
     service = AgoraService()
     if service.initialize(config) != 0:
@@ -263,7 +265,7 @@ def main() -> int:
     # Set the frame format before registering, so the observer is installed
     # against parameters the SDK has already accepted.
     fmt = local_user.set_playback_audio_frame_before_mixing_parameters(CHANNELS, SAMPLE_RATE)
-    sink = _AudioSink()
+    sink = _AudioSink(session.get("device_id") or "")
     registered = connection.register_audio_frame_observer(sink, 0, None)
     LOGGER.info("frame params -> %s, observer registered -> %s", fmt, registered)
 
@@ -286,7 +288,7 @@ def main() -> int:
     while _running:
         time.sleep(1)
         if time.time() - last_report >= 30:
-            LOGGER.info("%d frames forwarded (%d mixed, %d callbacks)", sink.frames, sink.mixed_frames, sink.calls)
+            LOGGER.info("%d frames forwarded (%d callbacks)", sink.frames, sink.calls)
             last_report = time.time()
 
     LOGGER.info("Shutting down after %d frames", sink.frames)
