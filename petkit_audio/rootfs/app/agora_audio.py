@@ -112,6 +112,10 @@ def main() -> int:
     config.enable_audio_processor = 1
     config.enable_video = 0
     config.channel_profile = ChannelProfileType.CHANNEL_PROFILE_LIVE_BROADCASTING
+    # Keep delivering callbacks even if Agora considers the publisher muted.
+    # Without this a muted remote is silently indistinguishable from one that is
+    # simply not sending, which is exactly the ambiguity we are trying to settle.
+    config.should_callbck_when_muted = 1
 
     service = AgoraService()
     if service.initialize(config) != 0:
@@ -146,6 +150,12 @@ def main() -> int:
         connection.release()
         service.release()
         return 1
+
+    # auto_subscribe_audio should cover this, but ask explicitly as well: the
+    # feeder is already publishing when we arrive, so there is no join event to
+    # trigger an implicit subscribe.
+    subscribed = local_user.subscribe_all_audio()
+    LOGGER.info("subscribe_all_audio -> %s", subscribed)
 
     LOGGER.info("Connected; waiting for audio")
     last_report = time.time()
