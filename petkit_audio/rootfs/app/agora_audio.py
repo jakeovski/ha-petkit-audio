@@ -16,8 +16,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import signal
 import sys
+import threading
 import time
 
 from agora.rtc.agora_base import (
@@ -118,66 +120,78 @@ class _TrackLog(IRTCLocalUserObserver):
 
 
 class _AudioSink(IAudioFrameObserver):
-    """Write the feeder's audio frames to stdout.
+    """Hand the feeder's audio frames to a writer thread.
 
-    The callback fires once per remote user and this channel holds more than one
-    - the feeder plus Home Assistant's own signalling session. Writing both into
-    the same pipe interleaves two PCM streams, which is heard as robotic noise,
-    so everything except the publisher is discarded.
+    The SDK warns against doing real work in its callbacks: they run on its own
+    audio thread, and a blocking write there stalls the pipeline and corrupts the
+    stream. So the callback only copies bytes onto a queue.
+
+    The callback also fires once per remote user and this channel holds more than
+    one - the feeder plus Home Assistant's signalling session - so everything
+    except the publisher is discarded.
     """
 
-    def __init__(self, publisher_uid: str) -> None:
+    def __init__(self, publisher_uid: str, frames: queue.Queue) -> None:
         self.publisher_uid = str(publisher_uid)
-        self.frames = 0
+        self.queue = frames
+        self.accepted = 0
+        self.dropped = 0
         self.calls = 0
-        self.first_frame_logged = False
+        self.format_written = False
 
     def on_playback_audio_frame_before_mixing(
         self, agora_local_user, channelId, uid, frame, vad_result_state, vad_result_bytearray
     ):
-        # Callbacks must stay cheap - copying bytes out is all we do here.
         self.calls += 1
         if str(uid) != self.publisher_uid:
             return 0
         data = getattr(frame, "buffer", None)
-        if data:
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-            self.frames += 1
-            if not self.first_frame_logged:
-                LOGGER.info(
-                    "First frame from uid=%s: %d bytes, %s Hz, %s ch, %s bytes/sample",
-                    uid,
-                    len(data),
-                    getattr(frame, "samples_per_sec", None),
-                    getattr(frame, "channels", None),
-                    getattr(frame, "bytes_per_sample", None),
-                )
-                self.first_frame_logged = True
+        if not data:
+            return 0
+        if not self.format_written:
+            self.format_written = True
+            _write_format_report(frame, uid, len(data))
+        try:
+            self.queue.put_nowait(bytes(data))
+            self.accepted += 1
+        except queue.Full:
+            self.dropped += 1
         return 0
 
 
+def _write_format_report(frame, uid, size: int) -> None:
+    """Record the real frame geometry where it can be read back.
 
-def _apply_payload_type(parameter, where: str) -> None:
-    """Tell the decoder which payload type the feeder publishes under.
-
-    Frames arrive but never reach `on_first_remote_audio_decoded` without this,
-    because the decoder has no mapping for the device's non-standard payload
-    type. Both forms are attempted - the return codes tell us which one took.
+    The add-on log is not always reachable, and guessing the sample rate or
+    channel count is precisely how audio ends up sounding like static.
     """
-    if parameter is None:
-        LOGGER.warning("No parameter object on %s", where)
-        return
-    via_json = parameter.set_parameters(
-        json.dumps({"che.audio.custom_payload_type": CUSTOM_AUDIO_PAYLOAD_TYPE})
-    )
-    via_int = parameter.set_int(
-        "che.audio.custom_payload_type", CUSTOM_AUDIO_PAYLOAD_TYPE
-    )
-    LOGGER.info(
-        "custom_payload_type on %s: set_parameters=%s set_int=%s", where, via_json, via_int
-    )
+    report = {
+        "uid": str(uid),
+        "buffer_bytes": size,
+        "samples_per_sec": getattr(frame, "samples_per_sec", None),
+        "channels": getattr(frame, "channels", None),
+        "bytes_per_sample": getattr(frame, "bytes_per_sample", None),
+        "samples_per_channel": getattr(frame, "samples_per_channel", None),
+    }
+    LOGGER.info("First frame format: %s", report)
+    try:
+        with open("/config/petkit_audio_debug.json", "w", encoding="utf-8") as handle:
+            json.dump(report, handle)
+    except OSError as err:
+        LOGGER.debug("Could not write format report: %s", err)
 
+
+def _stdout_writer(frames: queue.Queue) -> None:
+    """Drain queued frames to stdout, off the SDK's audio thread."""
+    while True:
+        chunk = frames.get()
+        if chunk is None:
+            return
+        try:
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+        except BrokenPipeError:
+            return
 
 
 def _load_session(path: str) -> dict:
@@ -265,7 +279,9 @@ def main() -> int:
     # Set the frame format before registering, so the observer is installed
     # against parameters the SDK has already accepted.
     fmt = local_user.set_playback_audio_frame_before_mixing_parameters(CHANNELS, SAMPLE_RATE)
-    sink = _AudioSink(session.get("device_id") or "")
+    frame_queue: queue.Queue = queue.Queue(maxsize=200)
+    threading.Thread(target=_stdout_writer, args=(frame_queue,), daemon=True).start()
+    sink = _AudioSink(session.get("device_id") or "", frame_queue)
     registered = connection.register_audio_frame_observer(sink, 0, None)
     LOGGER.info("frame params -> %s, observer registered -> %s", fmt, registered)
 
@@ -288,10 +304,10 @@ def main() -> int:
     while _running:
         time.sleep(1)
         if time.time() - last_report >= 30:
-            LOGGER.info("%d frames forwarded (%d callbacks)", sink.frames, sink.calls)
+            LOGGER.info("%d frames queued, %d dropped, %d callbacks", sink.accepted, sink.dropped, sink.calls)
             last_report = time.time()
 
-    LOGGER.info("Shutting down after %d frames", sink.frames)
+    LOGGER.info("Shutting down after %d frames", sink.accepted)
     connection.disconnect()
     connection.release()
     service.release()
