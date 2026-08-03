@@ -29,6 +29,7 @@ from agora.rtc.agora_base import (
 )
 from agora.rtc.agora_service import AgoraService
 from agora.rtc.audio_frame_observer import IAudioFrameObserver
+from agora.rtc.rtc_connection_observer import IRTCConnectionObserver
 
 # The payload type the devices publish under. The vendor app sets the same value
 # on its engine before joining; without it the SDK will not decode the stream.
@@ -41,6 +42,33 @@ CHANNELS = 1
 
 LOGGER = logging.getLogger("petkit_audio")
 _running = True
+
+
+class _ConnectionLog(IRTCConnectionObserver):
+    """Report what the channel is actually doing.
+
+    connect() only returns whether the request was accepted, so without this
+    there is no way to tell a joined channel from one still retrying, or to see
+    whether the feeder is even present.
+    """
+
+    def on_connected(self, agora_rtc_conn, conn_info, reason):
+        LOGGER.info("Channel connected (reason=%s)", reason)
+
+    def on_disconnected(self, agora_rtc_conn, conn_info, reason):
+        LOGGER.warning("Channel disconnected (reason=%s)", reason)
+
+    def on_connection_failure(self, agora_rtc_conn, info, reason):
+        LOGGER.error("Channel connection failure (reason=%s)", reason)
+
+    def on_user_joined(self, agora_rtc_conn, user_id):
+        LOGGER.info("Remote user joined: %s", user_id)
+
+    def on_user_left(self, agora_rtc_conn, user_id, reason):
+        LOGGER.info("Remote user left: %s (reason=%s)", user_id, reason)
+
+    def on_error(self, agora_rtc_conn, error_code, error_msg):
+        LOGGER.error("Agora error %s: %s", error_code, error_msg)
 
 
 class _AudioSink(IAudioFrameObserver):
@@ -140,6 +168,7 @@ def main() -> int:
         service.release()
         return 1
 
+    connection.register_observer(_ConnectionLog())
     sink = _AudioSink()
     connection.register_audio_frame_observer(sink, 0, None)
     local_user = connection.get_local_user()
