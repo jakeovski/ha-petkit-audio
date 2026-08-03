@@ -22,19 +22,6 @@ import sys
 import threading
 import time
 
-from agora.rtc.agora_base import (
-    AgoraServiceConfig,
-    AudioScenarioType,
-    ChannelProfileType,
-    ClientRoleType,
-    RTCConnConfig,
-    RtcConnectionPublishConfig,
-)
-from agora.rtc.agora_service import AgoraService
-from agora.rtc.audio_frame_observer import IAudioFrameObserver
-from agora.rtc.local_user_observer import IRTCLocalUserObserver
-from agora.rtc.rtc_connection_observer import IRTCConnectionObserver
-
 # The payload type the devices publish under. The vendor app sets the same value
 # on its engine before joining; without it the SDK will not decode the stream.
 CUSTOM_AUDIO_PAYLOAD_TYPE = 69
@@ -44,8 +31,69 @@ CUSTOM_AUDIO_PAYLOAD_TYPE = 69
 SAMPLE_RATE = 16000
 CHANNELS = 1
 
+logging.basicConfig(
+    stream=sys.stderr,
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
 LOGGER = logging.getLogger("petkit_audio")
 _running = True
+
+
+def _stdout_writer(frames: queue.Queue) -> None:
+    """Drain queued frames to stdout, filling gaps with silence.
+
+    The stream has to exist even when the feeder is not publishing. Home
+    Assistant's camera points at a go2rtc stream that merges this audio with the
+    video, and go2rtc dials every source before serving, so an audio source that
+    only appears once the feeder starts talking takes the video down with it.
+    Emitting silence keeps the stream continuously alive.
+    """
+    global _running
+    # 20 ms of 16 kHz mono s16le.
+    silence = b"\x00" * (SAMPLE_RATE // 50 * 2)
+    try:
+        while _running:
+            try:
+                chunk = frames.get(timeout=0.02)
+            except queue.Empty:
+                chunk = silence
+            if chunk is None:
+                break
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+    except (BrokenPipeError, ValueError, OSError) as err:
+        LOGGER.info("Downstream closed (%s); shutting down", err)
+    finally:
+        # go2rtc restarts this pipeline for the next viewer, so the process has
+        # to die with its consumer. Left running it holds the Agora connection
+        # open, and every frame it receives is dropped into a queue nobody
+        # drains - which is exactly what a second viewer would then hear.
+        _running = False
+
+
+# Frames from the SDK's audio thread to the writer above.
+FRAME_QUEUE: queue.Queue = queue.Queue(maxsize=200)
+
+# Start writing before the Agora SDK is imported. Loading its native library
+# takes about ten seconds, and go2rtc times out waiting for the first bytes of a
+# source that produces nothing for that long - which showed up as the video
+# taking half a minute to appear, because go2rtc dials every source of the
+# combined stream before serving any of them.
+threading.Thread(target=_stdout_writer, args=(FRAME_QUEUE,), daemon=True).start()
+
+from agora.rtc.agora_base import (  # noqa: E402
+    AgoraServiceConfig,
+    AudioScenarioType,
+    ChannelProfileType,
+    ClientRoleType,
+    RTCConnConfig,
+    RtcConnectionPublishConfig,
+)
+from agora.rtc.agora_service import AgoraService  # noqa: E402
+from agora.rtc.audio_frame_observer import IAudioFrameObserver  # noqa: E402
+from agora.rtc.local_user_observer import IRTCLocalUserObserver  # noqa: E402
+from agora.rtc.rtc_connection_observer import IRTCConnectionObserver  # noqa: E402
 
 
 class _ConnectionLog(IRTCConnectionObserver):
@@ -111,7 +159,17 @@ class _TrackLog(IRTCLocalUserObserver):
     def on_first_remote_audio_decoded(self, agora_local_user, user_id, elapsed):
         LOGGER.info("FIRST REMOTE AUDIO DECODED from uid=%s after %sms", user_id, elapsed)
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_stats = 0.0
+
     def on_remote_audio_track_statistics(self, agora_local_user, agora_remote_audio_track, stats):
+        # The SDK reports twice a second; at that rate the log outgrows anything
+        # worth reading long before a session is over.
+        now = time.time()
+        if now - self._last_stats < 30:
+            return
+        self._last_stats = now
         LOGGER.info(
             "Remote audio stats: received=%s frozen=%s",
             getattr(stats, "received_bytes", None),
@@ -181,32 +239,6 @@ def _write_format_report(frame, uid, size: int) -> None:
         LOGGER.debug("Could not write format report: %s", err)
 
 
-def _stdout_writer(frames: queue.Queue) -> None:
-    """Drain queued frames to stdout, filling gaps with silence.
-
-    The stream has to exist even when the feeder is not publishing. Home
-    Assistant's camera points at a go2rtc stream that merges this audio with the
-    video, and go2rtc dials every source before serving, so an audio source that
-    only appears once the feeder starts talking takes the video down with it.
-    Emitting silence keeps the stream continuously alive.
-    """
-    # 20 ms of 16 kHz mono s16le.
-    silence = b"\x00" * (SAMPLE_RATE // 50 * 2)
-    while True:
-        try:
-            chunk = frames.get(timeout=0.02)
-        except queue.Empty:
-            chunk = silence
-        if chunk is None:
-            return
-        try:
-            sys.stdout.buffer.write(chunk)
-            sys.stdout.buffer.flush()
-        except BrokenPipeError:
-            return
-
-
-
 def _apply_payload_type(parameter, where: str) -> None:
     """Tell the decoder which payload type the feeder publishes under.
 
@@ -239,16 +271,8 @@ def _stop(signum, frame) -> None:
 
 
 def main() -> int:
-    logging.basicConfig(
-        stream=sys.stderr,
-        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
-
-    frame_queue: queue.Queue = queue.Queue(maxsize=200)
-    threading.Thread(target=_stdout_writer, args=(frame_queue,), daemon=True).start()
 
     session_file = os.environ.get("SESSION_FILE", "/config/petkit_agora_session.json")
     deadline = time.time() + 120
@@ -316,7 +340,7 @@ def main() -> int:
     # Set the frame format before registering, so the observer is installed
     # against parameters the SDK has already accepted.
     fmt = local_user.set_playback_audio_frame_before_mixing_parameters(CHANNELS, SAMPLE_RATE)
-    sink = _AudioSink(session.get("device_id") or "", frame_queue)
+    sink = _AudioSink(session.get("device_id") or "", FRAME_QUEUE)
     registered = connection.register_audio_frame_observer(sink, 0, None)
     LOGGER.info("frame params -> %s, observer registered -> %s", fmt, registered)
 
@@ -342,7 +366,13 @@ def main() -> int:
             LOGGER.info("%d frames queued, %d dropped, %d callbacks", sink.accepted, sink.dropped, sink.calls)
             last_report = time.time()
 
-    LOGGER.info("Shutting down after %d frames", sink.accepted)
+    LOGGER.info("Shutting down after %d frames (%d dropped)", sink.accepted, sink.dropped)
+    # The native SDK has been seen to block in release(). A stuck process would
+    # keep the channel occupied and stop the next viewer's pipeline from
+    # starting, so give teardown a few seconds and then leave regardless.
+    bail = threading.Timer(5.0, lambda: os._exit(0))
+    bail.daemon = True
+    bail.start()
     connection.disconnect()
     connection.release()
     service.release()

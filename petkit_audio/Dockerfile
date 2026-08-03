@@ -12,6 +12,7 @@ RUN apt-get update \
         curl \
         ffmpeg \
         jq \
+        procps \
     && rm -rf /var/lib/apt/lists/*
 
 # 2.4.8 rather than 2.4.9: the latter points at an aarch64 archive that 404s.

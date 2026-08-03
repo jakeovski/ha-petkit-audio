@@ -15,6 +15,19 @@ python3 -u /app/agora_audio.py 2>> "$LOGFILE" \
     | ffmpeg -hide_banner -loglevel warning \
         -f s16le -ar 16000 -ac 1 -i pipe:0 \
         -c:a libopus -b:a 32k -application lowdelay \
-        -f rtsp -rtsp_transport tcp "$OUTPUT" 2>> "$LOGFILE"
+        -f rtsp -rtsp_transport tcp "$OUTPUT" 2>> "$LOGFILE" &
+PIPELINE=$!
 
-echo "[audio_pipe] exited rc=$?" >> "$LOGFILE"
+# go2rtc signals this script when the last viewer disconnects. Anything left
+# behind keeps the Agora channel occupied, so the next viewer's pipeline joins
+# alongside a stale client instead of replacing it.
+_reap() {
+    kill "$PIPELINE" 2>/dev/null
+    pkill -f 'python3 -u /app/agora_audio.py' 2>/dev/null
+}
+trap '_reap' TERM INT
+
+wait "$PIPELINE"
+RC=$?
+_reap
+echo "[audio_pipe] exited rc=${RC}" >> "$LOGFILE"
