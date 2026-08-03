@@ -30,6 +30,7 @@ from agora.rtc.agora_base import (
 )
 from agora.rtc.agora_service import AgoraService
 from agora.rtc.audio_frame_observer import IAudioFrameObserver
+from agora.rtc.local_user_observer import IRTCLocalUserObserver
 from agora.rtc.rtc_connection_observer import IRTCConnectionObserver
 
 # The payload type the devices publish under. The vendor app sets the same value
@@ -78,6 +79,42 @@ class _ConnectionLog(IRTCConnectionObserver):
         scenario = int(getattr(recommend_audio_scenario, "value", recommend_audio_scenario))
         LOGGER.info("AI-QoS capability missing; falling back to scenario %s", scenario)
         return scenario
+
+
+class _TrackLog(IRTCLocalUserObserver):
+    """Trace the remote audio track from subscription through to decoding.
+
+    Being in the channel says nothing about whether Agora is offering us an
+    audio track, or whether anything is arriving on it. These three callbacks
+    separate "no track", "track but no packets" and "packets but no decode",
+    which need completely different fixes.
+    """
+
+    def on_user_audio_track_subscribed(self, agora_local_user, user_id, agora_remote_audio_track):
+        LOGGER.info("Audio track SUBSCRIBED for uid=%s", user_id)
+
+    def on_audio_subscribe_state_changed(
+        self, agora_local_user, channel, user_id, old_state, new_state, elapse_since_last_state
+    ):
+        LOGGER.info("Audio subscribe state uid=%s: %s -> %s", user_id, old_state, new_state)
+
+    def on_user_audio_track_state_changed(
+        self, agora_local_user, user_id, agora_remote_audio_track, state, reason, elapsed
+    ):
+        LOGGER.info("Audio track state uid=%s: state=%s reason=%s", user_id, state, reason)
+
+    def on_first_remote_audio_frame(self, agora_local_user, user_id, elapsed):
+        LOGGER.info("FIRST REMOTE AUDIO FRAME from uid=%s after %sms", user_id, elapsed)
+
+    def on_first_remote_audio_decoded(self, agora_local_user, user_id, elapsed):
+        LOGGER.info("FIRST REMOTE AUDIO DECODED from uid=%s after %sms", user_id, elapsed)
+
+    def on_remote_audio_track_statistics(self, agora_local_user, agora_remote_audio_track, stats):
+        LOGGER.info(
+            "Remote audio stats: received=%s frozen=%s",
+            getattr(stats, "received_bytes", None),
+            getattr(stats, "frozen_rate", None),
+        )
 
 
 class _AudioSink(IAudioFrameObserver):
@@ -203,6 +240,7 @@ def main() -> int:
         )
 
     connection.register_observer(_ConnectionLog())
+    connection.register_local_user_observer(_TrackLog())
     sink = _AudioSink()
     connection.register_audio_frame_observer(sink, 0, None)
     local_user = connection.get_local_user()
