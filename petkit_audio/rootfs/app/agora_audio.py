@@ -22,6 +22,7 @@ import time
 
 from agora.rtc.agora_base import (
     AgoraServiceConfig,
+    AudioScenarioType,
     ChannelProfileType,
     ClientRoleType,
     RTCConnConfig,
@@ -69,6 +70,14 @@ class _ConnectionLog(IRTCConnectionObserver):
 
     def on_error(self, agora_rtc_conn, error_code, error_msg):
         LOGGER.error("Agora error %s: %s", error_code, error_msg)
+
+    def on_aiqos_capability_missing(self, agora_rtc_conn, recommend_audio_scenario) -> int:
+        # The base class returns None here and the SDK immediately does
+        # `None >= 0`, so the scenario fallback dies with a TypeError and the
+        # connection is left in a scenario the channel cannot satisfy.
+        scenario = int(getattr(recommend_audio_scenario, "value", recommend_audio_scenario))
+        LOGGER.info("AI-QoS capability missing; falling back to scenario %s", scenario)
+        return scenario
 
 
 class _AudioSink(IAudioFrameObserver):
@@ -140,6 +149,10 @@ def main() -> int:
     config.enable_audio_processor = 1
     config.enable_video = 0
     config.channel_profile = ChannelProfileType.CHANNEL_PROFILE_LIVE_BROADCASTING
+    # The SDK defaults to the AI_SERVER scenario, which this channel does not
+    # advertise support for - it asks to fall back to game streaming, so start
+    # there rather than relying on a fallback path that has already failed.
+    config.audio_scenario = AudioScenarioType.AUDIO_SCENARIO_GAME_STREAMING
     # Keep delivering callbacks even if Agora considers the publisher muted.
     # Without this a muted remote is silently indistinguishable from one that is
     # simply not sending, which is exactly the ambiguity we are trying to settle.
