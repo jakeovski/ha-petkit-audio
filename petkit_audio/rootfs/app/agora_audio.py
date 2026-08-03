@@ -182,9 +182,21 @@ def _write_format_report(frame, uid, size: int) -> None:
 
 
 def _stdout_writer(frames: queue.Queue) -> None:
-    """Drain queued frames to stdout, off the SDK's audio thread."""
+    """Drain queued frames to stdout, filling gaps with silence.
+
+    The stream has to exist even when the feeder is not publishing. Home
+    Assistant's camera points at a go2rtc stream that merges this audio with the
+    video, and go2rtc dials every source before serving, so an audio source that
+    only appears once the feeder starts talking takes the video down with it.
+    Emitting silence keeps the stream continuously alive.
+    """
+    # 20 ms of 16 kHz mono s16le.
+    silence = b"\x00" * (SAMPLE_RATE // 50 * 2)
     while True:
-        chunk = frames.get()
+        try:
+            chunk = frames.get(timeout=0.02)
+        except queue.Empty:
+            chunk = silence
         if chunk is None:
             return
         try:
@@ -192,6 +204,7 @@ def _stdout_writer(frames: queue.Queue) -> None:
             sys.stdout.buffer.flush()
         except BrokenPipeError:
             return
+
 
 
 def _load_session(path: str) -> dict:
@@ -212,6 +225,9 @@ def main() -> int:
     )
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
+
+    frame_queue: queue.Queue = queue.Queue(maxsize=200)
+    threading.Thread(target=_stdout_writer, args=(frame_queue,), daemon=True).start()
 
     session_file = os.environ.get("SESSION_FILE", "/config/petkit_agora_session.json")
     deadline = time.time() + 120
@@ -279,8 +295,6 @@ def main() -> int:
     # Set the frame format before registering, so the observer is installed
     # against parameters the SDK has already accepted.
     fmt = local_user.set_playback_audio_frame_before_mixing_parameters(CHANNELS, SAMPLE_RATE)
-    frame_queue: queue.Queue = queue.Queue(maxsize=200)
-    threading.Thread(target=_stdout_writer, args=(frame_queue,), daemon=True).start()
     sink = _AudioSink(session.get("device_id") or "", frame_queue)
     registered = connection.register_audio_frame_observer(sink, 0, None)
     LOGGER.info("frame params -> %s, observer registered -> %s", fmt, registered)
